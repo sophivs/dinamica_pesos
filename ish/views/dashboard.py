@@ -1,55 +1,34 @@
-import geopandas as gpd
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-from ish.config import CORES
-from ish.controllers.files import salvar_upload, selecionar_e_carregar
-from ish.models.calculations import validar_mapeamento, calcular_ish, criar_faixas
-from ish.views.components import interface_mapeamento, excel_bytes, layout_grafico
+from ish.config import BETA, Q95, DIMENSOES
+from ish.models.repository import carregar_dataset
+from ish.models.calculations import calcular_ish, criar_faixas
+from ish.views.components import excel_bytes, layout_grafico
 
-def dashboard_dataset(uploaded_file, titulo, prefixo, pesos):
-    if uploaded_file is None:
-        st.markdown(
-            f'<div class="info-strip">Selecione o arquivo de <b>{titulo}</b> '
-            f'na barra lateral para carregar o dashboard.</div>',
-            unsafe_allow_html=True,
-        )
-        return
+@st.cache_data(show_spinner=False)
+def dados_fixos(prefixo):
+    return carregar_dataset(prefixo)
 
-    caminho = salvar_upload(uploaded_file, f"path_{prefixo}")
-    if not caminho:
-        return
-
+def dashboard_dataset(titulo, prefixo, pesos_dimensoes, pesos_variaveis):
     try:
         with st.spinner(f"Carregando {titulo}..."):
-            gdf, tipo_fonte = selecionar_e_carregar(caminho, uploaded_file, prefixo)
-    except Exception as exc:
-        st.error(f"Não foi possível abrir o arquivo: {exc}")
+            origem = dados_fixos(prefixo)
+    except (FileNotFoundError, ValueError, KeyError) as exc:
+        st.error(f"Não foi possível carregar os dados fixos: {exc}")
         return
 
-    if gdf.empty:
-        st.warning("O arquivo não contém registros.")
+    if origem.empty:
+        st.warning("A planilha não contém registros.")
         return
 
-    mapeamento = interface_mapeamento(gdf, prefixo)
-    erros = validar_mapeamento(gdf, mapeamento)
-
-    if erros:
-        for erro in erros:
-            st.error(erro)
-        return
-
-    resultado = calcular_ish(gdf, pesos, mapeamento)
-    df = resultado.drop(columns="geometry", errors="ignore").copy()
+    df = calcular_ish(origem, pesos_dimensoes, pesos_variaveis)
     novo = df["ISH com pesos escolhidos"]
-
-    beta = mapeamento["ISH Beta Original"]
-    possui_beta = (
-        beta != "Não calcular diferença"
-        and beta in df.columns
-        and "Diferença vs Beta" in df.columns
-    )
+    beta = BETA
+    possui_beta = True
+    mapeamento = {dim: f"{dim} ponderada" for dim in DIMENSOES}
+    mapeamento["Fator Q95"] = Q95
 
     # --------------------------------------------------------
     # FILTROS / AÇÕES
@@ -71,7 +50,7 @@ def dashboard_dataset(uploaded_file, titulo, prefixo, pesos):
             csv,
             file_name=f"ISH_{prefixo}.csv",
             mime="text/csv",
-            use_container_width=True,
+            width="stretch",
         )
 
     with xlsx_col:
@@ -80,13 +59,13 @@ def dashboard_dataset(uploaded_file, titulo, prefixo, pesos):
             excel_bytes(df),
             file_name=f"ISH_{prefixo}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
+            width="stretch",
         )
 
     # --------------------------------------------------------
     # KPIs
     # --------------------------------------------------------
-    st.markdown('<div class="section-label">Visão geral</div>', unsafe_allow_html=True)
+    st.subheader("Visão geral")
 
     if possui_beta:
         diferenca = df["Diferença vs Beta"]
@@ -120,8 +99,9 @@ def dashboard_dataset(uploaded_file, titulo, prefixo, pesos):
     # --------------------------------------------------------
     # GRÁFICOS - LINHA 1
     # --------------------------------------------------------
-    st.markdown('<div class="section-label">Análise dos resultados</div>', unsafe_allow_html=True)
+    st.subheader("Análise dos resultados")
 
+    df = df.copy()
     df["_Faixa ISH"] = criar_faixas(novo)
     faixa = (
         df.groupby("_Faixa ISH", observed=True)
@@ -138,11 +118,11 @@ def dashboard_dataset(uploaded_file, titulo, prefixo, pesos):
             y="Registros",
             title="Registros por faixa de ISH",
             text_auto=True,
-            color_discrete_sequence=[CORES["azul"]],
+
         )
         fig_faixa.update_xaxes(title="Faixa de ISH")
         fig_faixa.update_yaxes(title="Quantidade")
-        st.plotly_chart(layout_grafico(fig_faixa), use_container_width=True)
+        st.plotly_chart(layout_grafico(fig_faixa), width="stretch", theme="streamlit")
 
     with c2:
         if possui_beta:
@@ -151,12 +131,12 @@ def dashboard_dataset(uploaded_file, titulo, prefixo, pesos):
                 x="Diferença vs Beta",
                 nbins=35,
                 title="Distribuição das diferenças vs Beta",
-                color_discrete_sequence=[CORES["verde"]],
+
             )
             fig_diff.add_vline(
                 x=0,
                 line_dash="dash",
-                line_color=CORES["vermelho"],
+
             )
             fig_diff.update_xaxes(title="Diferença (novo ISH − Beta)")
             fig_diff.update_yaxes(title="Quantidade")
@@ -166,10 +146,10 @@ def dashboard_dataset(uploaded_file, titulo, prefixo, pesos):
                 x="ISH com pesos escolhidos",
                 nbins=35,
                 title="Distribuição do novo ISH",
-                color_discrete_sequence=[CORES["verde"]],
+
             )
             fig_diff.update_xaxes(title="ISH")
-        st.plotly_chart(layout_grafico(fig_diff), use_container_width=True)
+        st.plotly_chart(layout_grafico(fig_diff), width="stretch", theme="streamlit")
 
     with c3:
         faixa_acum = faixa.copy()
@@ -182,7 +162,7 @@ def dashboard_dataset(uploaded_file, titulo, prefixo, pesos):
             x=faixa_acum["_Faixa ISH"],
             y=faixa_acum["Registros"],
             name="Registros",
-            marker_color=CORES["azul"],
+
         )
         fig_acum.add_scatter(
             x=faixa_acum["_Faixa ISH"],
@@ -190,7 +170,7 @@ def dashboard_dataset(uploaded_file, titulo, prefixo, pesos):
             name="Acumulado (%)",
             mode="lines+markers",
             yaxis="y2",
-            line=dict(color=CORES["laranja"], width=3),
+
         )
         fig_acum.update_layout(
             title="ISH acumulado por faixa",
@@ -202,7 +182,7 @@ def dashboard_dataset(uploaded_file, titulo, prefixo, pesos):
                 range=[0, 105],
             ),
         )
-        st.plotly_chart(layout_grafico(fig_acum), use_container_width=True)
+        st.plotly_chart(layout_grafico(fig_acum), width="stretch", theme="streamlit")
 
     # --------------------------------------------------------
     # GRÁFICOS - LINHA 2
@@ -231,20 +211,21 @@ def dashboard_dataset(uploaded_file, titulo, prefixo, pesos):
             orientation="h",
             title="Média por dimensão",
             text_auto=".3f",
-            color_discrete_sequence=[CORES["azul"]],
+
         )
-        st.plotly_chart(layout_grafico(fig_medias), use_container_width=True)
+        st.plotly_chart(layout_grafico(fig_medias), width="stretch", theme="streamlit")
 
     with c5:
         if possui_beta:
             aumentaram = int((df["Diferença vs Beta"] > 0).sum())
             diminuiram = int((df["Diferença vs Beta"] < 0).sum())
             iguais = int((df["Diferença vs Beta"] == 0).sum())
+            sem_beta = int(df["Diferença vs Beta"].isna().sum())
 
             situacao = pd.DataFrame(
                 {
-                    "Situação": ["Aumentaram", "Diminuíram", "Sem alteração"],
-                    "Quantidade": [aumentaram, diminuiram, iguais],
+                    "Situação": ["Aumentaram", "Diminuíram", "Sem alteração", "Sem Beta"],
+                    "Quantidade": [aumentaram, diminuiram, iguais, sem_beta],
                 }
             )
 
@@ -255,23 +236,18 @@ def dashboard_dataset(uploaded_file, titulo, prefixo, pesos):
                 hole=.58,
                 title="Situação em relação ao ISH Beta",
                 color="Situação",
-                color_discrete_map={
-                    "Aumentaram": CORES["verde"],
-                    "Diminuíram": CORES["vermelho"],
-                    "Sem alteração": CORES["cinza"],
-                },
             )
             fig_pizza.update_traces(textposition="inside", textinfo="percent")
-            st.plotly_chart(layout_grafico(fig_pizza), use_container_width=True)
+            st.plotly_chart(layout_grafico(fig_pizza), width="stretch", theme="streamlit")
         else:
             fig_q95 = px.histogram(
                 df,
                 x=mapeamento["Fator Q95"],
                 nbins=30,
                 title="Distribuição do fator Q95",
-                color_discrete_sequence=[CORES["laranja"]],
+
             )
-            st.plotly_chart(layout_grafico(fig_q95), use_container_width=True)
+            st.plotly_chart(layout_grafico(fig_q95), width="stretch", theme="streamlit")
 
     with c6:
         box_data = pd.DataFrame(
@@ -289,15 +265,10 @@ def dashboard_dataset(uploaded_file, titulo, prefixo, pesos):
             y="Valor",
             color="Dimensão",
             title="Distribuição do ISH por dimensão",
-            color_discrete_sequence=[
-                CORES["azul"],
-                CORES["verde"],
-                CORES["laranja"],
-                CORES["roxo"],
-            ],
+
         )
         fig_box.update_layout(showlegend=False)
-        st.plotly_chart(layout_grafico(fig_box), use_container_width=True)
+        st.plotly_chart(layout_grafico(fig_box), width="stretch", theme="streamlit")
 
     # --------------------------------------------------------
     # COMPARAÇÃO BETA
@@ -312,7 +283,7 @@ def dashboard_dataset(uploaded_file, titulo, prefixo, pesos):
                 y="ISH com pesos escolhidos",
                 opacity=.5,
                 title="Comparação entre o ISH Beta e o ISH recalculado",
-                color_discrete_sequence=[CORES["azul"]],
+
             )
 
             if not scatter_df.empty:
@@ -324,15 +295,15 @@ def dashboard_dataset(uploaded_file, titulo, prefixo, pesos):
                     y0=minimo,
                     x1=maximo,
                     y1=maximo,
-                    line=dict(dash="dash", color=CORES["vermelho"]),
+                    line=dict(dash="dash"),
                 )
 
-            st.plotly_chart(layout_grafico(fig_scatter, 430), use_container_width=True)
+            st.plotly_chart(layout_grafico(fig_scatter, 430), width="stretch", theme="streamlit")
 
     # --------------------------------------------------------
     # TABELA
     # --------------------------------------------------------
-    st.markdown('<div class="section-label">Dados detalhados</div>', unsafe_allow_html=True)
+    st.subheader("Dados detalhados")
 
     tabela = df.drop(columns=["_Faixa ISH"], errors="ignore")
 
@@ -345,17 +316,13 @@ def dashboard_dataset(uploaded_file, titulo, prefixo, pesos):
     st.caption(f"{len(tabela):,} registros exibidos".replace(",", "."))
     st.dataframe(
         tabela,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         height=500,
     )
 
-    with st.expander("Informações do arquivo"):
+    with st.expander("Informações dos dados"):
         a, b, c = st.columns(3)
-        a.metric("Registros", len(gdf))
-        b.metric("Colunas", len(gdf.columns))
-        if isinstance(gdf, gpd.GeoDataFrame):
-            c.metric("CRS", str(gdf.crs) if gdf.crs else "Não definido")
-        else:
-            c.metric("Fonte", tipo_fonte)
-
+        a.metric("Registros", len(origem))
+        b.metric("Colunas de origem", len(origem.columns))
+        c.metric("Fonte", "Excel incluído")

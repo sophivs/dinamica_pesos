@@ -1,40 +1,39 @@
 # Calculadora ISH 2025
 
-Aplicação Streamlit para recalcular o ISH com pesos definidos por especialistas. Aceita GeoPackage (`.gpkg`) ou Excel (`.xlsx`, `.xls`) para Municípios e Otto Bacias N4.
+Aplicação Streamlit para simular pesos das quatro dimensões e das 11 variáveis do ISH. A planilha de Municípios e Otto Bacias N4 já está incluída em `data/`; quem usa o aplicativo só precisa ajustar os pesos.
 
-## Instalação
+## Executar localmente
 
-Requer Python 3.10 ou superior. No terminal, dentro desta pasta:
+Requer Python 3.10 ou superior. Na pasta que contém `app.py`:
 
-```bash
+```powershell
 python -m venv .venv
-# Windows PowerShell:
-.\.venv\Scripts\Activate.ps1
-# Linux/macOS: source .venv/bin/activate
-python -m pip install -r requirements.txt
-python -m streamlit run app.py
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m streamlit run app.py
 ```
 
-Se o PowerShell bloquear a ativação, execute `.\.venv\Scripts\python.exe -m pip install -r requirements.txt` e `.\.venv\Scripts\python.exe -m streamlit run app.py` diretamente.
+No Linux/macOS, use `.venv/bin/python` no lugar de `.\.venv\Scripts\python.exe`.
 
-## Uso
+## Usar
 
-1. Envie o arquivo de Municípios ou de Otto Bacias N4 na barra lateral.
-2. Para Excel com várias abas, selecione a aba; `RESULTADOS_MUNICIPIOS` e `RESULTADOS_OTTO_N4` são detectadas automaticamente quando correspondem ao painel.
-3. Mapeie as cinco colunas numéricas exigidas caso seus nomes não sejam reconhecidos. A coluna ISH Beta é opcional.
-4. Ajuste os quatro pesos até somarem 100%. Consulte indicadores e gráficos e baixe os resultados em CSV ou Excel.
+Ajuste os pesos das **dimensões** na barra lateral. Abra cada dimensão em **Variáveis por dimensão** para ajustar os pesos internos. Os sliders e botões −/+ mudam de 1 em 1 ponto percentual. A soma das quatro dimensões e a soma das variáveis em cada dimensão precisam ser 100%. Enquanto alguma soma estiver diferente, o cálculo fica suspenso. O botão **Restaurar pesos iniciais** retorna ao cenário inicial.
 
-O cálculo é `ISH = (Humana × peso_H + Econômica × peso_E + Ecossistêmica × peso_Ec + Resiliência × peso_R) / 100 × Fator Q95`. Se houver coluna Beta, a diferença é `ISH recalculado − ISH Beta`. Os valores do Excel entram diretamente no cálculo, sem depender do GeoPackage. O arquivo exportado contém as colunas de entrada e as colunas calculadas; a geometria não é exportada.
+A dimensão Econômica começa em **34% / 33% / 33%**: três pesos exatamente iguais seriam 33⅓% cada, incompatíveis com ajustes inteiros de 1%. As demais variáveis começam com pesos iguais. O valor **ISH Beta** vem da planilha original e é mantido como referência; portanto, o cenário inicial pode ter uma pequena diferença em relação a ele.
+
+Para cada registro: `Dimensão = Σ (variável normalizada × peso interno / 100)` e `ISH = Σ (dimensão × peso da dimensão / 100) × Fator Q95`. `Diferença vs Beta = ISH recalculado − ISH Beta`. As colunas `Perdas_inv`, `DBO_inv` e `CV_pluv_inv` já são invertidas na planilha e não são invertidas novamente. O aplicativo recalcula as dimensões a partir das variáveis de origem, pois as colunas de fórmulas do Excel não contêm resultados armazenados. É possível baixar as tabelas calculadas em CSV ou Excel.
+
+Células vazias de variáveis contribuem com zero na soma ponderada, seguindo `SUMPRODUCT` da planilha original. Elas permanecem vazias nas colunas brutas exportadas. Quando o ISH Beta está vazio, a diferença também fica vazia.
 
 ## Estrutura
 
-- `app.py`: ponto de entrada, configuração e fluxo da aplicação.
-- `ish/models/calculations.py`: validação e regras de cálculo sem interface.
-- `ish/models/repository.py`: leitura de GeoPackage e Excel.
-- `ish/controllers/files.py`: upload, escolha da aba e coordenação da leitura.
-- `ish/views/components.py`: controles, mapeamento e exportação Excel.
-- `ish/views/dashboard.py`: painéis, gráficos e tabela.
-- `ish/views/styles.py`: estilos visuais.
-- `ish/config.py`: nomes de colunas e cores.
+- `app.py`: entrada e controles de pesos.
+- `data/ISH_2025_DINAMICA_PESOS_VARIAVEIS_E_DIMENSOES.xlsx`: fonte fixa incluída no pacote.
+- `ish/config.py`: dimensões, variáveis, colunas e pesos iniciais.
+- `ish/models/repository.py`: leitura das duas abas com dados brutos.
+- `ish/models/calculations.py`: cálculo e validação dos pesos.
+- `ish/views/components.py`: controles e exportação.
+- `ish/views/dashboard.py`: indicadores, gráficos e tabela.
 
-Execute sempre a partir da raiz desta pasta com `python -m streamlit run app.py`.
+## Deploy no Streamlit Community Cloud
+
+Publique **todo o conteúdo desta pasta** na raiz do repositório, incluindo `data/`, `ish/`, `app.py` e `requirements.txt`. Escolha a branch publicada e informe `app.py` como caminho do arquivo principal. O aplicativo não faz upload de dados em tempo de execução. A interface usa os componentes e as cores do tema do Streamlit, acompanhando o modo claro ou escuro.
