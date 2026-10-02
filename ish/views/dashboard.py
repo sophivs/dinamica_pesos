@@ -64,6 +64,27 @@ NOMES_UF_PARA_SIGLA = {
 }
 
 
+# Classes relativas municipais do ISH (quintis nacionais fornecidos para o projeto).
+# Os limites ficam fixos para que um município tenha a mesma classe independentemente
+# do estado selecionado no mapa.
+CLASSES_ISH_MUNICIPAL = ["Mínimo", "Baixo", "Médio", "Alto", "Máximo"]
+LIMITES_ISH_MUNICIPAL = [-float("inf"), 0.595502, 0.639708, 0.673738, 0.704601, float("inf")]
+CORES_ISH_MUNICIPAL = {
+    "Mínimo": "#d73027",
+    "Baixo": "#f46d43",
+    "Médio": "#fee08b",
+    "Alto": "#1a9850",
+    "Máximo": "#4575b4",
+}
+INTERVALOS_ISH_MUNICIPAL = {
+    "Mínimo": "0,294885 a 0,595502",
+    "Baixo": "> 0,595502 a 0,639708",
+    "Médio": "> 0,639708 a 0,673738",
+    "Alto": "> 0,673738 a 0,704601",
+    "Máximo": "> 0,704601 a 0,832294",
+}
+
+
 def normalizar_uf(valor):
     """Converte sigla ou nome de estado para uma sigla UF válida."""
     if pd.isna(valor):
@@ -302,6 +323,20 @@ def mapa_municipios(df, beta, mapeamento):
 
     mapa = mapa.reset_index(drop=True)
     mapa["_map_id"] = mapa.index.astype(str)
+
+    # Classificação relativa municipal pelos limites nacionais fornecidos.
+    # Não usamos qcut após filtrar a UF, pois isso criaria quintis diferentes
+    # para cada estado e impediria a comparação entre municípios do Brasil.
+    mapa["Classe relativa"] = pd.cut(
+        mapa["ISH com pesos escolhidos"],
+        bins=LIMITES_ISH_MUNICIPAL,
+        labels=CLASSES_ISH_MUNICIPAL,
+        include_lowest=True,
+        right=True,
+        ordered=True,
+    )
+    mapa["Intervalo da classe"] = mapa["Classe relativa"].map(INTERVALOS_ISH_MUNICIPAL)
+
     geojson = json.loads(mapa.to_json())
 
     # --------------------------------------------------------
@@ -311,6 +346,8 @@ def mapa_municipios(df, beta, mapeamento):
         "_map_id": False,
         "abbrev_state": True,
         "ISH com pesos escolhidos": ":.3f",
+        "Classe relativa": True,
+        "Intervalo da classe": True,
     }
 
     if beta in mapa.columns:
@@ -332,14 +369,16 @@ def mapa_municipios(df, beta, mapeamento):
         geojson=geojson,
         locations="_map_id",
         featureidkey="id",
-        color="ISH com pesos escolhidos",
+        color="Classe relativa",
         hover_name="name_muni",
         hover_data=hover,
-        color_continuous_scale="RdYlGn",
-        range_color=(0, 1),
+        color_discrete_map=CORES_ISH_MUNICIPAL,
+        category_orders={"Classe relativa": CLASSES_ISH_MUNICIPAL},
         labels={
             "abbrev_state": "UF",
             "ISH com pesos escolhidos": "ISH",
+            "Classe relativa": "Classe relativa",
+            "Intervalo da classe": "Intervalo do ISH",
             beta: "ISH Beta",
             "Diferença vs Beta": "Diferença",
             mapeamento.get("Humana"): "Humana",
@@ -357,9 +396,9 @@ def mapa_municipios(df, beta, mapeamento):
     fig.update_layout(
         height=650,
         margin=dict(l=0, r=0, t=20, b=0),
-        coloraxis_colorbar=dict(
-            title="ISH",
-            thickness=15,
+        legend=dict(
+            title="Classe relativa",
+            traceorder="normal",
         ),
     )
 
@@ -370,6 +409,14 @@ def mapa_municipios(df, beta, mapeamento):
         config={"displaylogo": False, "scrollZoom": False},
     )
 
+    st.caption(
+        "Classes relativas municipais: "
+        "Mínimo (0,294885–0,595502) · "
+        "Baixo (>0,595502–0,639708) · "
+        "Médio (>0,639708–0,673738) · "
+        "Alto (>0,673738–0,704601) · "
+        "Máximo (>0,704601–0,832294)."
+    )
     st.caption(
         f"{len(mapa):,} municípios de {uf_selecionada} representados no mapa."
         .replace(",", ".")
