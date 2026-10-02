@@ -1,3 +1,5 @@
+import json
+import unicodedata
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -10,6 +12,294 @@ from ish.views.components import excel_bytes, layout_grafico
 @st.cache_data(show_spinner=False)
 def dados_fixos(prefixo):
     return carregar_dataset(prefixo)
+
+def normalizar_texto(valor):
+    """Remove acentos e padroniza texto para comparações."""
+    if pd.isna(valor):
+        return ""
+
+    texto = str(valor).strip().lower()
+
+    return "".join(
+        caractere
+        for caractere in unicodedata.normalize("NFKD", texto)
+        if not unicodedata.combining(caractere)
+    )
+
+
+def encontrar_coluna(df, candidatos):
+    """Procura uma coluna usando nomes alternativos."""
+    colunas_normalizadas = {
+        normalizar_texto(coluna): coluna
+        for coluna in df.columns
+    }
+
+    for candidato in candidatos:
+        candidato_normalizado = normalizar_texto(candidato)
+
+        if candidato_normalizado in colunas_normalizadas:
+            return colunas_normalizadas[candidato_normalizado]
+
+    return None
+
+
+@st.cache_data(show_spinner=False)
+def carregar_malha_municipios():
+    """
+    Carrega a malha municipal brasileira.
+
+    A geometria fica em cache, portanto não é baixada novamente
+    sempre que o usuário altera os pesos.
+    """
+    from geobr import read_municipality
+
+    municipios = read_municipality(
+        code_muni="all",
+        year=2025,
+    )
+
+    return municipios
+
+
+def mapa_municipios(df, beta, mapeamento):
+    """Renderiza mapa interativo do ISH por município."""
+
+    st.subheader("Mapa do ISH por município")
+
+    st.caption(
+        "Passe o mouse sobre um município para visualizar seus indicadores. "
+        "O mapa é atualizado automaticamente conforme os pesos selecionados."
+    )
+
+    try:
+        municipios = carregar_malha_municipios().copy()
+
+    except Exception as exc:
+        st.warning(
+            f"Não foi possível carregar a malha municipal do Brasil: {exc}"
+        )
+        return
+
+    dados = df.copy()
+
+    # --------------------------------------------------------
+    # IDENTIFICAR COLUNAS DA PLANILHA
+    # --------------------------------------------------------
+
+    coluna_codigo = encontrar_coluna(
+        dados,
+        [
+            "Código IBGE",
+            "Codigo IBGE",
+            "Código do Município",
+            "Codigo do Municipio",
+            "Código Município",
+            "Codigo Municipio",
+            "Cod IBGE",
+            "Cod Municipio",
+            "CD_MUN",
+            "CD_MUNICIPIO",
+            "code_muni",
+            "cod_mun",
+        ],
+    )
+
+    coluna_municipio = encontrar_coluna(
+        dados,
+        [
+            "Município",
+            "Municipio",
+            "Nome do Município",
+            "Nome do Municipio",
+            "NM_MUN",
+            "name_muni",
+        ],
+    )
+
+    coluna_uf = encontrar_coluna(
+        dados,
+        [
+            "UF",
+            "Sigla UF",
+            "Estado",
+            "abbrev_state",
+        ],
+    )
+
+    # --------------------------------------------------------
+    # CRIAR CHAVE PARA LIGAR EXCEL E MALHA
+    # --------------------------------------------------------
+
+    if coluna_codigo is not None:
+
+        dados["_codigo_municipio"] = (
+            dados[coluna_codigo]
+            .astype(str)
+            .str.replace(".0", "", regex=False)
+            .str.extract(r"(\d+)", expand=False)
+        )
+
+        municipios["_codigo_7"] = (
+            municipios["code_muni"]
+            .astype(str)
+            .str.replace(".0", "", regex=False)
+            .str.extract(r"(\d+)", expand=False)
+            .str.zfill(7)
+        )
+
+        # Alguns bancos utilizam código IBGE com 6 dígitos.
+        municipios["_codigo_6"] = municipios["_codigo_7"].str[:6]
+
+        comprimentos = (
+            dados["_codigo_municipio"]
+            .dropna()
+            .str.len()
+        )
+
+        if not comprimentos.empty and comprimentos.median() <= 6:
+            municipios["_chave"] = municipios["_codigo_6"]
+            dados["_chave"] = dados["_codigo_municipio"].str.zfill(6)
+        else:
+            municipios["_chave"] = municipios["_codigo_7"]
+            dados["_chave"] = dados["_codigo_municipio"].str.zfill(7)
+
+    elif coluna_municipio is not None and coluna_uf is not None:
+
+        # Alternativa quando o arquivo não possui código IBGE.
+        dados["_chave"] = (
+            dados[coluna_municipio].map(normalizar_texto)
+            + "-"
+            + dados[coluna_uf].map(normalizar_texto)
+        )
+
+        municipios["_chave"] = (
+            municipios["name_muni"].map(normalizar_texto)
+            + "-"
+            + municipios["abbrev_state"].map(normalizar_texto)
+        )
+
+    else:
+        st.warning(
+            "Para criar o mapa é necessário que a base de municípios tenha "
+            "uma coluna de Código IBGE ou as colunas Município + UF."
+        )
+        return
+
+    # --------------------------------------------------------
+    # JUNTAR GEOMETRIA COM OS RESULTADOS DO ISH
+    # --------------------------------------------------------
+
+    # Evita levar colunas de geometria da tabela de dados.
+    dados_merge = dados.drop(
+        columns=["geometry"],
+        errors="ignore",
+    )
+
+    mapa = municipios.merge(
+        dados_merge,
+        on="_chave",
+        how="left",
+    )
+
+    mapa = mapa[
+        mapa["ISH com pesos escolhidos"].notna()
+    ].copy()
+
+    if mapa.empty:
+        st.warning(
+            "Nenhum município da base conseguiu ser associado à malha do IBGE. "
+            "Verifique o Código IBGE ou as colunas Município/UF."
+        )
+        return
+
+    # ID usado pelo Plotly para relacionar polígonos e registros.
+    mapa = mapa.reset_index(drop=True)
+    mapa["_map_id"] = mapa.index.astype(str)
+
+    geojson = json.loads(mapa.to_json())
+
+    # --------------------------------------------------------
+    # INFORMAÇÕES EXIBIDAS NO HOVER
+    # --------------------------------------------------------
+
+    hover = {
+        "_map_id": False,
+        "abbrev_state": True,
+        "ISH com pesos escolhidos": ":.3f",
+    }
+
+    if beta in mapa.columns:
+        hover[beta] = ":.3f"
+
+    if "Diferença vs Beta" in mapa.columns:
+        hover["Diferença vs Beta"] = ":+.3f"
+
+    for dimensao in [
+        "Humana",
+        "Econômica",
+        "Ecossistêmica",
+        "Resiliência",
+    ]:
+        coluna = mapeamento.get(dimensao)
+
+        if coluna and coluna in mapa.columns:
+            hover[coluna] = ":.3f"
+
+    # --------------------------------------------------------
+    # MAPA
+    # --------------------------------------------------------
+
+    fig = px.choropleth(
+        mapa,
+        geojson=geojson,
+        locations="_map_id",
+        featureidkey="id",
+        color="ISH com pesos escolhidos",
+        hover_name="name_muni",
+        hover_data=hover,
+        color_continuous_scale="RdYlGn",
+        range_color=(0, 1),
+        labels={
+            "abbrev_state": "UF",
+            "ISH com pesos escolhidos": "ISH",
+            beta: "ISH Beta",
+            "Diferença vs Beta": "Diferença",
+            mapeamento.get("Humana"): "Humana",
+            mapeamento.get("Econômica"): "Econômica",
+            mapeamento.get("Ecossistêmica"): "Ecossistêmica",
+            mapeamento.get("Resiliência"): "Resiliência",
+        },
+    )
+
+    fig.update_geos(
+        fitbounds="locations",
+        visible=False,
+    )
+
+    fig.update_layout(
+        height=720,
+        margin=dict(
+            l=0,
+            r=0,
+            t=20,
+            b=0,
+        ),
+        coloraxis_colorbar=dict(
+            title="ISH",
+            thickness=15,
+        ),
+    )
+
+    st.plotly_chart(
+        fig,
+        width="stretch",
+        theme="streamlit",
+    )
+
+    st.caption(
+        f"{len(mapa):,} municípios representados no mapa.".replace(",", ".")
+    )
+
 
 def dashboard_dataset(titulo, prefixo, pesos_dimensoes, pesos_variaveis):
     try:
@@ -95,6 +385,24 @@ def dashboard_dataset(titulo, prefixo, pesos_dimensoes, pesos_variaveis):
         kpis[1].metric("ISH médio", f"{novo.mean():.3f}")
         kpis[2].metric("ISH mínimo", f"{novo.min():.3f}")
         kpis[3].metric("ISH máximo", f"{novo.max():.3f}")
+
+    # --------------------------------------------------------
+    # MAPA - SOMENTE MUNICÍPIOS
+    # --------------------------------------------------------
+
+    eh_municipios = (
+        "municip" in normalizar_texto(titulo)
+        or "municip" in normalizar_texto(prefixo)
+    )
+
+    if eh_municipios:
+        st.divider()
+        mapa_municipios(
+            df,
+            beta,
+            mapeamento,
+        )
+        st.divider()
 
     # --------------------------------------------------------
     # GRÁFICOS - LINHA 1
