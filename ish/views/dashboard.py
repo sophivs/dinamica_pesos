@@ -43,49 +43,99 @@ def encontrar_coluna(df, candidatos):
     return None
 
 
-@st.cache_data(show_spinner=False)
-def carregar_malha_municipios():
-    """
-    Carrega a malha municipal brasileira.
+# Código IBGE dos estados. Usado para descobrir a UF quando a base possui
+# apenas o código do município, sem uma coluna UF explícita.
+CODIGOS_UF_IBGE = {
+    "RO": "11", "AC": "12", "AM": "13", "RR": "14", "PA": "15", "AP": "16", "TO": "17",
+    "MA": "21", "PI": "22", "CE": "23", "RN": "24", "PB": "25", "PE": "26", "AL": "27",
+    "SE": "28", "BA": "29", "MG": "31", "ES": "32", "RJ": "33", "SP": "35", "PR": "41",
+    "SC": "42", "RS": "43", "MS": "50", "MT": "51", "GO": "52", "DF": "53",
+}
+CODIGO_IBGE_PARA_UF = {codigo: uf for uf, codigo in CODIGOS_UF_IBGE.items()}
 
-    A geometria fica em cache, portanto não é baixada novamente
-    sempre que o usuário altera os pesos.
-    """
+NOMES_UF_PARA_SIGLA = {
+    "acre": "AC", "alagoas": "AL", "amapa": "AP", "amazonas": "AM", "bahia": "BA",
+    "ceara": "CE", "distrito federal": "DF", "espirito santo": "ES", "goias": "GO",
+    "maranhao": "MA", "mato grosso": "MT", "mato grosso do sul": "MS", "minas gerais": "MG",
+    "para": "PA", "paraiba": "PB", "parana": "PR", "pernambuco": "PE", "piaui": "PI",
+    "rio de janeiro": "RJ", "rio grande do norte": "RN", "rio grande do sul": "RS",
+    "rondonia": "RO", "roraima": "RR", "santa catarina": "SC", "sao paulo": "SP",
+    "sergipe": "SE", "tocantins": "TO",
+}
+
+
+def normalizar_uf(valor):
+    """Converte sigla ou nome de estado para uma sigla UF válida."""
+    if pd.isna(valor):
+        return None
+
+    texto_original = str(valor).strip()
+    sigla = texto_original.upper()
+
+    if sigla in CODIGOS_UF_IBGE:
+        return sigla
+
+    codigo = texto_original.replace(".0", "")
+    if codigo.isdigit():
+        return CODIGO_IBGE_PARA_UF.get(codigo.zfill(2))
+
+    return NOMES_UF_PARA_SIGLA.get(normalizar_texto(texto_original))
+
+
+@st.cache_resource(show_spinner=False)
+def carregar_malha_estado(uf):
+    """Carrega e simplifica somente a malha municipal da UF selecionada."""
     from geobr import read_municipality
 
+    # O geobr aceita a sigla do estado em code_muni, evitando carregar o Brasil inteiro.
     municipios = read_municipality(
-        code_muni="all",
+        code_muni=uf,
         year=2025,
+        simplified=True,
+    )
+
+    municipios = municipios[
+        [
+            "code_muni",
+            "name_muni",
+            "abbrev_state",
+            "geometry",
+        ]
+    ].copy()
+
+    # Simplificação adicional em metros: como o mapa exibe somente uma UF,
+    # 200 m preserva bem o desenho e reduz ainda mais o GeoJSON enviado ao navegador.
+    municipios = municipios.to_crs(epsg=5880)
+    municipios["geometry"] = municipios.geometry.simplify(
+        tolerance=200,
+        preserve_topology=True,
+    )
+    municipios = municipios.to_crs(epsg=4326)
+
+    municipios["code_muni"] = (
+        municipios["code_muni"]
+        .astype(int)
+        .astype(str)
+        .str.zfill(7)
     )
 
     return municipios
 
 
 def mapa_municipios(df, beta, mapeamento):
-    """Renderiza mapa interativo do ISH por município."""
+    """Renderiza mapa interativo do ISH somente para a UF selecionada."""
 
     st.subheader("Mapa do ISH por município")
-
     st.caption(
-        "Passe o mouse sobre um município para visualizar seus indicadores. "
-        "O mapa é atualizado automaticamente conforme os pesos selecionados."
+        "Selecione primeiro um estado. A malha municipal só será carregada depois "
+        "da seleção, deixando o dashboard mais leve."
     )
-
-    try:
-        municipios = carregar_malha_municipios().copy()
-
-    except Exception as exc:
-        st.warning(
-            f"Não foi possível carregar a malha municipal do Brasil: {exc}"
-        )
-        return
 
     dados = df.copy()
 
     # --------------------------------------------------------
     # IDENTIFICAR COLUNAS DA PLANILHA
     # --------------------------------------------------------
-
     coluna_codigo = encontrar_coluna(
         dados,
         [
@@ -126,18 +176,77 @@ def mapa_municipios(df, beta, mapeamento):
         ],
     )
 
-    # --------------------------------------------------------
-    # CRIAR CHAVE PARA LIGAR EXCEL E MALHA
-    # --------------------------------------------------------
+    if coluna_codigo is None and (coluna_municipio is None or coluna_uf is None):
+        st.warning(
+            "Para criar o mapa é necessário que a base de municípios tenha "
+            "uma coluna de Código IBGE ou as colunas Município + UF."
+        )
+        return
 
+    # --------------------------------------------------------
+    # DESCOBRIR UF SEM CARREGAR NENHUMA GEOMETRIA
+    # --------------------------------------------------------
+    if coluna_uf is not None:
+        dados["_uf_mapa"] = dados[coluna_uf].map(normalizar_uf)
+    else:
+        dados["_uf_mapa"] = None
+
+    # Se também houver Código IBGE, ele serve como fallback para registros
+    # cuja coluna UF esteja vazia ou em um formato não reconhecido.
     if coluna_codigo is not None:
-
         dados["_codigo_municipio"] = (
             dados[coluna_codigo]
             .astype(str)
             .str.replace(".0", "", regex=False)
             .str.extract(r"(\d+)", expand=False)
         )
+        uf_por_codigo = dados["_codigo_municipio"].str[:2].map(CODIGO_IBGE_PARA_UF)
+        dados["_uf_mapa"] = dados["_uf_mapa"].fillna(uf_por_codigo)
+
+    ufs_disponiveis = sorted(
+        uf for uf in dados["_uf_mapa"].dropna().unique()
+        if uf in CODIGOS_UF_IBGE
+    )
+
+    if not ufs_disponiveis:
+        st.warning("Não foi possível identificar os estados existentes na base de municípios.")
+        return
+
+    uf_selecionada = st.selectbox(
+        "Selecione o estado",
+        options=ufs_disponiveis,
+        index=None,
+        placeholder="Escolha uma UF para carregar o mapa...",
+        key="mapa_municipios_uf",
+    )
+
+    # O ponto principal da otimização: nenhuma geometria é carregada antes daqui.
+    if uf_selecionada is None:
+        st.info("Selecione um estado acima para visualizar os municípios no mapa.")
+        return
+
+    dados = dados.loc[dados["_uf_mapa"] == uf_selecionada].copy()
+
+    try:
+        with st.spinner(f"Carregando municípios de {uf_selecionada}..."):
+            municipios = carregar_malha_estado(uf_selecionada).copy()
+    except Exception as exc:
+        st.warning(
+            f"Não foi possível carregar a malha municipal de {uf_selecionada}: {exc}"
+        )
+        return
+
+    # --------------------------------------------------------
+    # CRIAR CHAVE PARA LIGAR DADOS E MALHA
+    # --------------------------------------------------------
+    if coluna_codigo is not None:
+        if "_codigo_municipio" not in dados.columns:
+            dados["_codigo_municipio"] = (
+                dados[coluna_codigo]
+                .astype(str)
+                .str.replace(".0", "", regex=False)
+                .str.extract(r"(\d+)", expand=False)
+            )
 
         municipios["_codigo_7"] = (
             municipios["code_muni"]
@@ -146,15 +255,9 @@ def mapa_municipios(df, beta, mapeamento):
             .str.extract(r"(\d+)", expand=False)
             .str.zfill(7)
         )
-
-        # Alguns bancos utilizam código IBGE com 6 dígitos.
         municipios["_codigo_6"] = municipios["_codigo_7"].str[:6]
 
-        comprimentos = (
-            dados["_codigo_municipio"]
-            .dropna()
-            .str.len()
-        )
+        comprimentos = dados["_codigo_municipio"].dropna().str.len()
 
         if not comprimentos.empty and comprimentos.median() <= 6:
             municipios["_chave"] = municipios["_codigo_6"]
@@ -163,37 +266,24 @@ def mapa_municipios(df, beta, mapeamento):
             municipios["_chave"] = municipios["_codigo_7"]
             dados["_chave"] = dados["_codigo_municipio"].str.zfill(7)
 
-    elif coluna_municipio is not None and coluna_uf is not None:
-
-        # Alternativa quando o arquivo não possui código IBGE.
+    else:
+        # A base já foi filtrada pela UF selecionada; por isso usamos a UF
+        # normalizada na chave, inclusive quando "Estado" contém o nome por extenso.
         dados["_chave"] = (
             dados[coluna_municipio].map(normalizar_texto)
             + "-"
-            + dados[coluna_uf].map(normalizar_texto)
+            + dados["_uf_mapa"].str.lower()
         )
-
         municipios["_chave"] = (
             municipios["name_muni"].map(normalizar_texto)
             + "-"
-            + municipios["abbrev_state"].map(normalizar_texto)
+            + municipios["abbrev_state"].str.lower()
         )
 
-    else:
-        st.warning(
-            "Para criar o mapa é necessário que a base de municípios tenha "
-            "uma coluna de Código IBGE ou as colunas Município + UF."
-        )
-        return
-
     # --------------------------------------------------------
-    # JUNTAR GEOMETRIA COM OS RESULTADOS DO ISH
+    # JUNTAR SOMENTE OS MUNICÍPIOS DO ESTADO SELECIONADO
     # --------------------------------------------------------
-
-    # Evita levar colunas de geometria da tabela de dados.
-    dados_merge = dados.drop(
-        columns=["geometry"],
-        errors="ignore",
-    )
+    dados_merge = dados.drop(columns=["geometry"], errors="ignore")
 
     mapa = municipios.merge(
         dados_merge,
@@ -201,27 +291,22 @@ def mapa_municipios(df, beta, mapeamento):
         how="left",
     )
 
-    mapa = mapa[
-        mapa["ISH com pesos escolhidos"].notna()
-    ].copy()
+    mapa = mapa.loc[mapa["ISH com pesos escolhidos"].notna()].copy()
 
     if mapa.empty:
         st.warning(
-            "Nenhum município da base conseguiu ser associado à malha do IBGE. "
+            f"Nenhum município de {uf_selecionada} conseguiu ser associado à malha do IBGE. "
             "Verifique o Código IBGE ou as colunas Município/UF."
         )
         return
 
-    # ID usado pelo Plotly para relacionar polígonos e registros.
     mapa = mapa.reset_index(drop=True)
     mapa["_map_id"] = mapa.index.astype(str)
-
     geojson = json.loads(mapa.to_json())
 
     # --------------------------------------------------------
     # INFORMAÇÕES EXIBIDAS NO HOVER
     # --------------------------------------------------------
-
     hover = {
         "_map_id": False,
         "abbrev_state": True,
@@ -234,21 +319,14 @@ def mapa_municipios(df, beta, mapeamento):
     if "Diferença vs Beta" in mapa.columns:
         hover["Diferença vs Beta"] = ":+.3f"
 
-    for dimensao in [
-        "Humana",
-        "Econômica",
-        "Ecossistêmica",
-        "Resiliência",
-    ]:
+    for dimensao in ["Humana", "Econômica", "Ecossistêmica", "Resiliência"]:
         coluna = mapeamento.get(dimensao)
-
         if coluna and coluna in mapa.columns:
             hover[coluna] = ":.3f"
 
     # --------------------------------------------------------
     # MAPA
     # --------------------------------------------------------
-
     fig = px.choropleth(
         mapa,
         geojson=geojson,
@@ -277,13 +355,8 @@ def mapa_municipios(df, beta, mapeamento):
     )
 
     fig.update_layout(
-        height=720,
-        margin=dict(
-            l=0,
-            r=0,
-            t=20,
-            b=0,
-        ),
+        height=650,
+        margin=dict(l=0, r=0, t=20, b=0),
         coloraxis_colorbar=dict(
             title="ISH",
             thickness=15,
@@ -294,10 +367,12 @@ def mapa_municipios(df, beta, mapeamento):
         fig,
         width="stretch",
         theme="streamlit",
+        config={"displaylogo": False, "scrollZoom": False},
     )
 
     st.caption(
-        f"{len(mapa):,} municípios representados no mapa.".replace(",", ".")
+        f"{len(mapa):,} municípios de {uf_selecionada} representados no mapa."
+        .replace(",", ".")
     )
 
 
