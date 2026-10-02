@@ -1,5 +1,6 @@
 import json
 import unicodedata
+from pathlib import Path
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -83,6 +84,23 @@ INTERVALOS_ISH_MUNICIPAL = {
     "Alto": "> 0,673738 a 0,704601",
     "Máximo": "> 0,704601 a 0,832294",
 }
+
+REGIOES_BRASIL = {
+    "Norte": ["AC", "AP", "AM", "PA", "RO", "RR", "TO"],
+    "Nordeste": ["AL", "BA", "CE", "MA", "PB", "PE", "PI", "RN", "SE"],
+    "Centro-Oeste": ["DF", "GO", "MS", "MT"],
+    "Sudeste": ["ES", "MG", "RJ", "SP"],
+    "Sul": ["PR", "RS", "SC"],
+}
+
+UF_PARA_REGIAO = {
+    uf: regiao
+    for regiao, ufs in REGIOES_BRASIL.items()
+    for uf in ufs
+}
+
+CLASSES_ISH_OTTO = ["Mínimo", "Baixo", "Médio", "Alto", "Máximo"]
+CORES_ISH_OTTO = CORES_ISH_MUNICIPAL.copy()
 
 
 def normalizar_uf(valor):
@@ -423,6 +441,320 @@ def mapa_municipios(df, beta, mapeamento):
     )
 
 
+def obter_coluna_wts_pk(df):
+    return encontrar_coluna(
+        df,
+        [
+            "wts_pk",
+            "WTS_PK",
+            "wts pk",
+            "ottobacia",
+            "otto",
+            "id_otto",
+            "codigo_otto",
+            "cod_otto",
+        ],
+    )
+
+
+@st.cache_resource(show_spinner=False)
+def carregar_limites_estaduais():
+    from geobr import read_state
+
+    estados = read_state(code_state="all", year=2025, simplified=True)
+    estados = estados[["abbrev_state", "name_state", "geometry"]].copy()
+    estados["regiao"] = estados["abbrev_state"].map(UF_PARA_REGIAO)
+
+    estados = estados.to_crs(epsg=5880)
+    estados["geometry"] = estados.geometry.simplify(
+        tolerance=300,
+        preserve_topology=True,
+    )
+    estados = estados.to_crs(epsg=4326)
+    return estados
+
+
+@st.cache_resource(show_spinner=False)
+def localizar_shapefile_otto():
+    candidatos = [
+        Path("OTTO_N4_APP_LEVE.shp"),
+        Path("./OTTO_N4_APP_LEVE.shp"),
+        Path("./dados/OTTO_N4_APP_LEVE.shp"),
+        Path("./data/OTTO_N4_APP_LEVE.shp"),
+        Path("./assets/OTTO_N4_APP_LEVE.shp"),
+        Path("./ish/data/OTTO_N4_APP_LEVE.shp"),
+        Path("/mnt/data/OTTO_N4_APP_LEVE.shp"),
+    ]
+
+    for caminho in candidatos:
+        if caminho.exists():
+            return caminho
+
+    raise FileNotFoundError(
+        "Não encontrei o shapefile OTTO_N4_APP_LEVE.shp. "
+        "Coloque os arquivos .shp, .shx, .dbf, .prj e .cpg na mesma pasta do app "
+        "ou em ./dados, ./data, ./assets ou ./ish/data."
+    )
+
+
+@st.cache_resource(show_spinner=False)
+def carregar_ottobacias():
+    import geopandas as gpd
+
+    caminho = localizar_shapefile_otto()
+    otto = gpd.read_file(caminho)
+
+    if "wts_pk" not in otto.columns:
+        coluna_wts = encontrar_coluna(otto, ["wts_pk", "WTS_PK", "wts pk"])
+        if not coluna_wts:
+            raise ValueError(
+                "O shapefile de ottobacias precisa ter a coluna wts_pk para o relacionamento com o Excel."
+            )
+        otto = otto.rename(columns={coluna_wts: "wts_pk"})
+
+    if otto.crs is None:
+        otto = otto.set_crs(epsg=4674, allow_override=True)
+
+    if otto.crs.to_epsg() != 4326:
+        otto = otto.to_crs(epsg=4326)
+
+    # Simplificação leve para reduzir o GeoJSON enviado ao navegador.
+    otto = otto.to_crs(epsg=5880)
+    otto["geometry"] = otto.geometry.simplify(
+        tolerance=150,
+        preserve_topology=True,
+    )
+    otto = otto.to_crs(epsg=4326)
+
+    otto["wts_pk"] = (
+        otto["wts_pk"]
+        .astype(str)
+        .str.replace(".0", "", regex=False)
+        .str.extract(r"(\d+)", expand=False)
+    )
+
+    estados = carregar_limites_estaduais()[["abbrev_state", "regiao", "geometry"]].copy()
+    pontos = otto[["wts_pk", "geometry"]].copy()
+    pontos["geometry"] = pontos.representative_point()
+
+    pontos = pontos.sjoin(
+        estados,
+        how="left",
+        predicate="within",
+    )[["wts_pk", "abbrev_state", "regiao"]]
+
+    otto = otto.merge(pontos, on="wts_pk", how="left")
+    return otto
+
+
+def construir_classes_quantis(valores, labels):
+    serie = pd.Series(valores).dropna().astype(float)
+    if serie.empty:
+        return None, None
+
+    quantis = serie.quantile([0, 0.2, 0.4, 0.6, 0.8, 1.0]).tolist()
+
+    limites = [quantis[0]]
+    for valor in quantis[1:]:
+        if valor <= limites[-1]:
+            valor = limites[-1] + 1e-9
+        limites.append(valor)
+
+    intervalos = {
+        labels[0]: f"{limites[0]:.6f} a {limites[1]:.6f}",
+        labels[1]: f"> {limites[1]:.6f} a {limites[2]:.6f}",
+        labels[2]: f"> {limites[2]:.6f} a {limites[3]:.6f}",
+        labels[3]: f"> {limites[3]:.6f} a {limites[4]:.6f}",
+        labels[4]: f"> {limites[4]:.6f} a {limites[5]:.6f}",
+    }
+    return limites, intervalos
+
+
+def mapa_ottobacias(df, beta, mapeamento):
+    st.subheader("Mapa do ISH por ottobacia")
+    st.caption(
+        "Selecione uma macrorregião para carregar apenas as ottobacias daquela área. "
+        "O mapa usa o shapefile OTTO_N4_APP_LEVE, com fundo do Brasil e divisões estaduais."
+    )
+
+    coluna_wts = obter_coluna_wts_pk(df)
+    if coluna_wts is None:
+        st.warning(
+            "Para criar o mapa de ottobacias, a base precisa ter uma coluna wts_pk para o relacionamento com o shapefile."
+        )
+        return
+
+    regiao = st.selectbox(
+        "Selecione a região",
+        options=list(REGIOES_BRASIL.keys()),
+        index=None,
+        placeholder="Escolha Norte, Nordeste, Centro-Oeste, Sudeste ou Sul...",
+        key="mapa_otto_regiao",
+    )
+
+    if regiao is None:
+        st.info("Selecione uma região acima para visualizar as ottobacias no mapa.")
+        return
+
+    try:
+        with st.spinner(f"Carregando ottobacias da região {regiao}..."):
+            otto = carregar_ottobacias().copy()
+            estados = carregar_limites_estaduais().copy()
+    except Exception as exc:
+        st.warning(f"Não foi possível carregar o shapefile das ottobacias: {exc}")
+        return
+
+    dados = df.copy()
+    dados["_wts_pk"] = (
+        dados[coluna_wts]
+        .astype(str)
+        .str.replace(".0", "", regex=False)
+        .str.extract(r"(\d+)", expand=False)
+    )
+
+    limites, intervalos = construir_classes_quantis(
+        df["ISH com pesos escolhidos"],
+        CLASSES_ISH_OTTO,
+    )
+    if limites is None:
+        st.warning("Não há valores suficientes de ISH para classificar as ottobacias.")
+        return
+
+    ufs_regiao = REGIOES_BRASIL[regiao]
+    otto_regiao = otto.loc[otto["regiao"] == regiao].copy()
+    estados_regiao = estados.loc[estados["abbrev_state"].isin(ufs_regiao)].copy()
+
+    # O shapefile e o Excel normalmente possuem uma coluna chamada wts_pk.
+    # Se ambas forem mantidas no merge, o pandas cria wts_pk_x / wts_pk_y e
+    # o Plotly deixa de encontrar a coluna canônica "wts_pk". Mantemos o
+    # wts_pk do shapefile e usamos apenas _wts_pk como chave auxiliar do Excel.
+    dados_merge = dados.drop(
+        columns=["geometry", coluna_wts],
+        errors="ignore",
+    )
+
+    mapa = otto_regiao.merge(
+        dados_merge,
+        left_on="wts_pk",
+        right_on="_wts_pk",
+        how="left",
+    )
+    mapa = mapa.loc[mapa["ISH com pesos escolhidos"].notna()].copy()
+
+    if mapa.empty:
+        st.warning(
+            f"Nenhuma ottobacia da região {regiao} conseguiu ser associada ao Excel pelo campo wts_pk."
+        )
+        return
+
+    mapa["Classe relativa"] = pd.cut(
+        mapa["ISH com pesos escolhidos"],
+        bins=limites,
+        labels=CLASSES_ISH_OTTO,
+        include_lowest=True,
+        right=True,
+        ordered=True,
+    )
+    mapa["Intervalo da classe"] = mapa["Classe relativa"].map(intervalos)
+
+    mapa = mapa.reset_index(drop=True)
+    mapa["_map_id"] = mapa.index.astype(str)
+    geojson_otto = json.loads(mapa.to_json())
+
+    estados_regiao = estados_regiao.reset_index(drop=True)
+    estados_regiao["_state_id"] = estados_regiao.index.astype(str)
+    geojson_estados = json.loads(estados_regiao.to_json())
+
+    hover = {
+        "_map_id": False,
+        "abbrev_state": True,
+        "wts_pk": True,
+        "ISH com pesos escolhidos": ":.3f",
+        "Classe relativa": True,
+        "Intervalo da classe": True,
+    }
+
+    if beta in mapa.columns:
+        hover[beta] = ":.3f"
+    if "Diferença vs Beta" in mapa.columns:
+        hover["Diferença vs Beta"] = ":+.3f"
+
+    for dimensao in ["Humana", "Econômica", "Ecossistêmica", "Resiliência"]:
+        coluna = mapeamento.get(dimensao)
+        if coluna and coluna in mapa.columns:
+            hover[coluna] = ":.3f"
+
+    fig = px.choropleth(
+        mapa,
+        geojson=geojson_otto,
+        locations="_map_id",
+        featureidkey="id",
+        color="Classe relativa",
+        hover_name="wts_pk",
+        hover_data=hover,
+        color_discrete_map=CORES_ISH_OTTO,
+        category_orders={"Classe relativa": CLASSES_ISH_OTTO},
+        labels={
+            "abbrev_state": "UF",
+            "wts_pk": "wts_pk",
+            "ISH com pesos escolhidos": "ISH",
+            "Classe relativa": "Classe relativa",
+            "Intervalo da classe": "Intervalo do ISH",
+            beta: "ISH Beta",
+            "Diferença vs Beta": "Diferença",
+            mapeamento.get("Humana"): "Humana",
+            mapeamento.get("Econômica"): "Econômica",
+            mapeamento.get("Ecossistêmica"): "Ecossistêmica",
+            mapeamento.get("Resiliência"): "Resiliência",
+        },
+    )
+
+    fig.update_traces(marker_line_width=0.4, marker_line_color="rgba(60,60,60,0.55)")
+
+    fig.add_trace(
+        go.Choropleth(
+            geojson=geojson_estados,
+            locations=estados_regiao["_state_id"],
+            z=[0] * len(estados_regiao),
+            featureidkey="id",
+            showscale=False,
+            hoverinfo="skip",
+            colorscale=[[0, "rgba(0,0,0,0)"], [1, "rgba(0,0,0,0)"]],
+            marker_line_color="rgba(0,0,0,0.9)",
+            marker_line_width=1.2,
+            name="Estados",
+        )
+    )
+
+    fig.update_geos(
+        fitbounds="locations",
+        visible=False,
+        bgcolor="rgba(0,0,0,0)",
+    )
+
+    fig.update_layout(
+        height=700,
+        margin=dict(l=0, r=0, t=20, b=0),
+        legend=dict(title="Classe relativa", traceorder="normal"),
+    )
+
+    st.plotly_chart(
+        fig,
+        width="stretch",
+        theme="streamlit",
+        config={"displaylogo": False, "scrollZoom": False},
+    )
+
+    st.caption(
+        "A classificação das ottobacias foi calculada por quintis com base em todos os registros da aba Otto, "
+        "mas o mapa renderiza apenas a região selecionada para ficar mais leve."
+    )
+    st.caption(
+        f"{len(mapa):,} ottobacias da região {regiao} representadas no mapa.".replace(",", ".")
+    )
+
+
+
 def dashboard_dataset(titulo, prefixo, pesos_dimensoes, pesos_variaveis):
     try:
         with st.spinner(f"Carregando {titulo}..."):
@@ -516,10 +848,23 @@ def dashboard_dataset(titulo, prefixo, pesos_dimensoes, pesos_variaveis):
         "municip" in normalizar_texto(titulo)
         or "municip" in normalizar_texto(prefixo)
     )
+    eh_otto = (
+        "otto" in normalizar_texto(titulo)
+        or "otto" in normalizar_texto(prefixo)
+    )
 
     if eh_municipios:
         st.divider()
         mapa_municipios(
+            df,
+            beta,
+            mapeamento,
+        )
+        st.divider()
+
+    if eh_otto:
+        st.divider()
+        mapa_ottobacias(
             df,
             beta,
             mapeamento,
