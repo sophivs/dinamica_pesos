@@ -37,3 +37,72 @@ Células vazias de variáveis contribuem com zero na soma ponderada, seguindo `S
 ## Deploy no Streamlit Community Cloud
 
 Publique **todo o conteúdo desta pasta** na raiz do repositório, incluindo `data/`, `ish/`, `app.py` e `requirements.txt`. Escolha a branch publicada e informe `app.py` como caminho do arquivo principal. O aplicativo não faz upload de dados em tempo de execução. A interface usa os componentes e as cores do tema do Streamlit, acompanhando o modo claro ou escuro.
+
+# Configuração do registro de especialistas no Google Sheets
+
+## O que foi alterado
+
+- Foi adicionada uma terceira aba no Streamlit: **Registro dos especialistas**.
+- O especialista usa os mesmos sliders da barra lateral para definir:
+  - pesos das quatro dimensões;
+  - pesos das variáveis dentro de cada dimensão.
+- Ao enviar, o app grava uma nova linha no Google Sheets.
+- A mesma aba mostra todas as respostas já registradas, com as mais recentes primeiro.
+- O app nunca sobrescreve respostas anteriores: cada envio recebe um ID único e um timestamp.
+
+## 1. Crie uma planilha no Google Sheets
+
+Crie uma planilha vazia. O app criará automaticamente a aba
+`RESPOSTAS_ESPECIALISTAS` se ela ainda não existir.
+
+Copie o ID da planilha. Em uma URL como:
+
+`https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz/edit`
+
+o ID é:
+
+`1AbCdEfGhIjKlMnOpQrStUvWxYz`
+
+## 2. Google Cloud
+
+No Google Cloud Console:
+
+1. Crie ou selecione um projeto.
+2. Ative **Google Sheets API**.
+3. Ative **Google Drive API**.
+4. Crie uma **Service Account**.
+5. Crie uma chave JSON para essa conta de serviço.
+
+## 3. Compartilhe a planilha
+
+No JSON da Service Account existe um campo `client_email`.
+
+Compartilhe a planilha do Google Sheets com esse e-mail e dê permissão de
+**Editor**.
+
+Sem isso, o app autentica mas não consegue abrir/gravar na planilha.
+
+## 4. Dependência Python
+
+Adicione ao seu `requirements.txt`:
+
+```text
+gspread>=6.2,<7
+```
+
+## 5. Secrets local
+
+Use `.streamlit/secrets.toml`.
+
+Há um arquivo `secrets.toml.example` neste pacote. Copie-o para
+`.streamlit/secrets.toml` e substitua os valores de exemplo pelos valores
+reais da chave JSON e pelo ID da planilha.
+
+Nunca envie `secrets.toml` com valores reais para o GitHub.
+
+## 6. Secrets no Streamlit Community Cloud
+
+No app publicado, abra as configurações do aplicativo e cole os mesmos
+Secrets usados localmente.
+
+Não é necessário subir o arquivo real `secrets.toml` no repositório.
